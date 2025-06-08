@@ -22,7 +22,7 @@ package riscv_pkg;
   // ----------------------
   // FIXME stop using them from CoreV-Verif and HPDCache
   // Then remove them from this package
-  localparam XLEN = 32; // it was cva6_config_pkg::CVA6ConfigXlen;
+  localparam XLEN = 32; // it was cva6_config_pkg::CVA6ConfigXlen;  // işlemcinin veri yolu genişliği. Yani burada XLEN 32 biti ifade ediyor
   localparam PLEN = (XLEN == 32) ? 34 : 56;
 
   // --------------------
@@ -230,7 +230,7 @@ package riscv_pkg;
   localparam OpcodeLoadFp = 7'b00_001_11;
   localparam OpcodeCustom0 = 7'b00_010_11;
   localparam OpcodeMiscMem = 7'b00_011_11;
-  localparam OpcodeOpImm = 7'b00_100_11;
+  localparam OpcodeOpImm_Zbb = 7'b00_100_11; // Zbb opcode'u Imm ile aynı olduğu için bu şekilde tanımladık
   localparam OpcodeAuipc = 7'b00_101_11;
   localparam OpcodeOpImm32 = 7'b00_110_11;
   // Quadrant 1
@@ -965,7 +965,7 @@ package riscv_pkg;
       default: return ret;
     endcase
   endfunction
-
+  
     localparam F3_BEQ   = 3'b000;
     localparam F3_BNE   = 3'b001;
     localparam F3_BLT   = 3'b100;
@@ -989,23 +989,25 @@ package riscv_pkg;
     localparam F3_XORI = 3'b100;
     localparam F3_ORI  = 3'b110;
     localparam F3_ANDI = 3'b111;
-    localparam F3_SLLI = 3'b001;
-    localparam F3_SRLI = 3'b101;
-    localparam F3_SRAI = 3'b101;
+    localparam F3_SLLI_ZBB = 3'b001;
+    localparam F3_SRLI_SRAI = 3'b101;
     localparam F3_JALR = 3'b000;
 
     localparam F7_SLLI = 7'b0000000;
     localparam F7_SRLI = 7'b0000000;
     localparam F7_SRAI = 7'b0100000;
+    localparam F7_ZBB  = 7'b0110000; //ZBB için ekledik
+    
+    localparam F5_CLZ  = 5'b00000;
+    localparam F5_CPOP = 5'b00010;
+    localparam F5_CTZ  = 5'b00001;
 
-    localparam F3_ADD  = 3'b000;
-    localparam F3_SUB  = 3'b000;
+    localparam F3_ADD_SUB  = 3'b000;
     localparam F3_SLL  = 3'b001;
     localparam F3_SLT  = 3'b010;
     localparam F3_SLTU = 3'b011;
     localparam F3_XOR  = 3'b100;
-    localparam F3_SRL  = 3'b101;
-    localparam F3_SRA  = 3'b101;
+    localparam F3_SRL_SRA  = 3'b101;
     localparam F3_OR   = 3'b110;
     localparam F3_AND  = 3'b111;
 
@@ -1019,6 +1021,7 @@ package riscv_pkg;
     localparam F7_SRA  = 7'b0100000;
     localparam F7_OR   = 7'b0000000;
     localparam F7_AND  = 7'b0000000;
+
 
     typedef struct packed { 
       logic [XLEN-1:0] data;
@@ -1065,9 +1068,158 @@ package riscv_pkg;
     SRA,
     OR,
     AND,
-    UNKNOWN
+    CLZ,
+    CPOP,
+    CTZ,
+    OPERATION_UNKNOWN
   } operation_e;
 
+  localparam MEM_SIZE = 2048;
+
+  // I-type immediate extend
+  function automatic logic [31:0] get_i_type_imm (logic [31:0] instr);
+    get_i_type_imm = {{20{instr[31]}}, instr[31:20]};
+  endfunction
+  // S-type immediate extend
+  function automatic logic [31:0] get_s_type_imm (logic [31:0] instr);
+    get_s_type_imm = {{20{instr[31]}}, instr[31:25], instr[11:7]};
+  endfunction
+  // B-type immediate extend
+  function automatic logic [31:0] get_b_type_imm (logic [31:0] instr);
+    get_b_type_imm = {{19{instr[31]}}, instr[31], instr[7], instr[30:25], instr[11:8], 1'b0};
+  endfunction
+  // U-type immediate extend
+  function automatic logic [31:0] get_u_type_imm (logic [31:0] instr);
+    get_u_type_imm = {instr[31:12], 12'b0};
+  endfunction
+  // J-type immediate extend
+  function automatic logic [31:0] get_j_type_imm (logic [31:0] instr);
+    get_j_type_imm = {{11{instr[31]}}, instr[31], instr[19:12], instr[20], instr[30:21], 1'b0};
+  endfunction
+
+  //LOAD/STORE addr calculation
+  function automatic logic [$clog2(MEM_SIZE)-1:0] get_LOAD_STORE_addr (logic [31:0] RD1_d);
+    get_LOAD_STORE_addr = RD1_d[$clog2(MEM_SIZE)-1:0];
+  endfunction
+
+  // Imm_Src_enum
+  typedef enum logic [2:0] {
+    I_TYPE,
+    S_TYPE,
+    B_TYPE,
+    U_TYPE,
+    J_TYPE,
+    IMM_SRC_DEFAULT
+  } Imm_Src_enum;
+
+  // Result_Src_enum
+  typedef enum logic {
+    EXECUTE_RESULT,
+    READ_DATA
+  } Result_Src_enum;
+
+  // ALU_Control_enum
+  typedef enum logic [3:0] {
+    ALU_ADD,
+    ALU_SUB,
+    ALU_SLT,
+    ALU_SLTU,
+    ALU_AND,
+    ALU_OR,
+    ALU_XOR,
+    ALU_SLL,
+    ALU_SRL,
+    ALU_SRA,
+    ALU_CONTROL_DEFAULT,
+    ALU_CONTROL_UNKNOWN // geçersiz bir komut gelirse bilmek için.
+  } ALU_Control_enum;
+
+  // ALU_Src_enum
+  typedef enum logic [1:0] {
+    RD2,    // Read Data 2 değeri.
+    EXT_IMM_DATA,
+    SHAMT,
+    ALU_SRC_DEFAULT
+  } ALU_Src_enum;
+
+  // Execute_Result_enum
+  typedef enum logic [2:0] {
+    ALU_RESULT,
+    AUIPC_RESULT,  // AUIPC ALU'da değil execute aşamasındaki PC_TARGET'ın hesaplandığı adder çıkışıyla alınacak ve mux ile Execute_Result'e bağlanacak.
+    EXECUTE_RESULT_IMM,
+    PC_PLUS_4,
+    ZBB,
+    EXECUTE_RESULT_DEFAULT
+   } Execute_Result_enum;
+
+  // Load_Type_enum
+   typedef enum logic [2:0] {
+    LOAD_TYPE_LB,
+    LOAD_TYPE_LH,
+    LOAD_TYPE_LW,
+    LOAD_TYPE_LBU,
+    LOAD_TYPE_LHU,
+    LOAD_DEFAULT
+   } Load_Type_enum;
+
+  // Store_Type_enum
+  typedef enum logic [2:0] {
+    STORE_TYPE_SB,
+    STORE_TYPE_SH,
+    STORE_TYPE_SW,
+    STORE_DEFAULT
+  } Store_Type_enum;
+
+  /*typedef enum logic [1:0] {
+    CLZ_,
+    CPOP,
+    CTZ,
+    ZBB_UNKNOWN
+  } Zbb_Type_enum;*/
+
+  function automatic logic [XLEN-1:0] clz_function(logic [XLEN-1:0] rs1_data); // msb bitinden itibaren arka arkaya kaç adet 0 olduğunu sayar.
+    logic [XLEN-1:0] result;
+    result = 0;
+    for(int i = 31; i>= 0; i--) begin
+      if(!rs1_data[i])
+        result++;
+      else
+        break;
+    end
+    return result;
+  endfunction
+
+  function automatic logic [XLEN-1:0] cpop_function(logic [XLEN-1:0] rs1_data);  // data içinde kaç 1 olduğunu sayar.
+    logic [XLEN-1:0] result;
+    result = 0;
+    for(int i = 0; i < XLEN; i++) begin
+      if(rs1_data[i])
+        result++;
+    end
+    return result;
+  endfunction
+
+  function automatic logic [XLEN-1:0] ctz_function(logic [XLEN-1:0] rs1_data); // lsb bitinden itibaren arka arkaya kaç adet 0 olduğunu sayar.
+    logic [XLEN-1:0] result;
+    result = 0;
+    for(int i = 0; i < XLEN; i++) begin
+      if(!rs1_data[i])
+        result++;
+      else
+        break;
+    end
+    return result;
+  endfunction
+
+  typedef enum logic [1:0] {
+    NO_FORWARD,
+    FORWARD_MEMORY,
+    FORWARD_WRITEBACK,
+    DEFAULT
+  } Forward_Type_enum;
+   
+  
+ 
   // trace log compatible to spikes commit log feature
   // pragma translate_off
   function string spikeCommitLog(logic [63:0] pc, priv_lvl_t priv_lvl, logic [31:0] instr,
